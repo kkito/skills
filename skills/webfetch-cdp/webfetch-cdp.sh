@@ -64,7 +64,7 @@ fi
 
 # Sanitize --wait-selector to prevent command injection via JS interpolation
 if [[ -n "$WAIT_SELECTOR" ]]; then
-  if [[ "$WAIT_SELECTOR" == *["';()"]* ]]; then
+  if [[ "$WAIT_SELECTOR" == *["';()\`"]* ]]; then
     echo "Error: --wait-selector contains invalid characters" >&2
     exit 1
   fi
