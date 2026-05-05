@@ -185,10 +185,20 @@ async function launchChromeWithCDP() {
 
 // --- Handle a single request ---
 
-async function handleRequest(browser, req) {
+async function handleRequest(browser, req, reconnectFn) {
   const { url, waitSelector, waitTime = 10000, viewport } = req;
   if (!url) {
     return { error: 'url is required' };
+  }
+
+  // Check if browser is still connected, reconnect if needed
+  if (!browser.isConnected()) {
+    console.error(`[http] Browser disconnected, reconnecting...`);
+    try {
+      await reconnectFn();
+    } catch (e) {
+      return { error: `Failed to reconnect: ${e.message}` };
+    }
   }
 
   let page = null;
@@ -277,38 +287,34 @@ async function main() {
   let wsUrl = await discoverChromeWsUrl();
   let browser;
 
-  if (wsUrl) {
-    console.error(`[cdp] Found Chrome CDP at ${wsUrl}`);
-    try {
-      browser = await chromium.connectOverCDP(wsUrl);
-    } catch (e) {
-      console.error(`Error: Failed to connect to Chrome via CDP (${wsUrl}): ${e.message}`);
-      process.exit(1);
-    }
-  } else {
-    // Auto-launch Chrome with CDP enabled
-    console.error('[cdp] No Chrome CDP found, attempting to launch Chrome...');
-    wsUrl = await launchChromeWithCDP();
+  async function connectBrowser() {
+    // Clear cached URL to force fresh discovery (Chrome restarts change the UUID)
+    wsUrl = null;
+    
+    wsUrl = await discoverChromeWsUrl();
     if (!wsUrl) {
-      console.error('Error: Chrome remote debugging port not found and failed to auto-launch.');
-      process.exit(1);
+      throw new Error('Chrome CDP not found');
     }
-    try {
-      browser = await chromium.connectOverCDP(wsUrl);
-    } catch (e) {
-      console.error(`Error: Failed to connect to auto-launched Chrome: ${e.message}`);
-      process.exit(1);
-    }
+    console.error(`[cdp] Connecting to Chrome CDP at ${wsUrl}`);
+    browser = await chromium.connectOverCDP(wsUrl);
+  }
+
+  try {
+    await connectBrowser();
+  } catch (e) {
+    console.error(`Error: Failed to connect to Chrome: ${e.message}`);
+    process.exit(1);
   }
 
   // Write PID so the shell wrapper can find us
   fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
   console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
 
-  // Monitor browser disconnection (single listener)
+  // Monitor browser disconnection - auto-reconnect on next request instead of exiting
+  let browserDisconnected = false;
   browser.on('disconnected', () => {
-    console.error('[FATAL] Browser disconnected! Process will exit.');
-    process.exit(1);
+    console.error('[WARN] Browser disconnected. Will reconnect on next request.');
+    browserDisconnected = true;
   });
 
   // Create HTTP server
@@ -321,7 +327,18 @@ async function main() {
           const reqData = JSON.parse(body);
           console.error(`[http] POST /fetch: ${reqData.url}`);
 
-          const result = await handleRequest(browser, reqData);
+          // Reconnect function for handleRequest
+          const reconnectFn = async () => {
+            console.error(`[http] Browser disconnected, reconnecting...`);
+            try {
+              await connectBrowser();
+              console.error('[http] Reconnected to Chrome CDP');
+            } catch (e) {
+              throw new Error(`Reconnect failed: ${e.message}`);
+            }
+          };
+
+          const result = await handleRequest(browser, reqData, reconnectFn);
           if (result.error) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: result.error }));
@@ -355,10 +372,10 @@ async function main() {
 
   // Keep process alive - HTTP server alone may not be enough if browser disconnects
   const keepAlive = setInterval(() => {
-    // Check if browser is still connected
+    // Check if browser is still connected (just log, don't exit)
     if (!browser.isConnected()) {
-      console.error('[keepalive] Browser disconnected, exiting...');
-      process.exit(1);
+      console.error('[keepalive] Browser disconnected, will reconnect on next request');
+      browserDisconnected = true;
     }
   }, 30000);
   keepAlive.ref();
