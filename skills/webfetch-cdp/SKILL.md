@@ -4,7 +4,6 @@ description: >
   Fetch web page content using playwright-cli CDP snapshot for LLM processing.
   Use when the user needs to access a webpage, extract information from a website,
   or get content from JavaScript-rendered pages (SPAs, dynamic content).
-  Triggers whenever web page access or information extraction from websites is needed.
 allowed-tools: Bash(webfetch-cdp.sh:*)
 ---
 
@@ -26,6 +25,14 @@ Fetch web page content using playwright-cli's CDP (Chrome DevTools Protocol) sna
 
 ```bash
 ./skills/webfetch-cdp/webfetch-cdp.sh --url "https://example.com"
+```
+
+Expected output:
+
+```yaml
+- generic [ref=e2]:
+  - heading "Example Domain" [level=1] [ref=e3]
+  - paragraph [ref=e4]: This domain is for use in documentation examples...
 ```
 
 ### Wait for Dynamic Content
@@ -77,6 +84,17 @@ The script automatically detects and reuses an open browser:
 | Browser already open | Reuses existing browser → navigates → fetches (keeps open) |
 
 To explicitly keep the browser open, use `--no-close`.
+
+## Error Handling
+
+If a command fails, you'll see an error message on stderr. Common issues:
+
+| Issue | Solution |
+|-------|----------|
+| Element not found | Add `--wait-selector` or increase `--wait-time` |
+| Empty snapshot | Page might need more time to render; use `--wait-selector` |
+| playwright-cli not found | Run `npm install -g playwright-cli` or use `npx playwright-cli` |
+| Navigation failed | Check that the URL is accessible and valid |
 
 ## Dependencies
 
