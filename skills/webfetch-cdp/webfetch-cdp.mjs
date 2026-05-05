@@ -2,17 +2,18 @@
 /**
  * webfetch-cdp.mjs - Core logic for fetching web page content via Playwright CDP
  *
- * Runs as a persistent background process. Listens on a Unix domain socket,
- * receives JSON requests, returns YAML snapshots.
+ * Runs as a persistent background process. Listens on an HTTP port (default 8668),
+ * receives JSON POST requests to /fetch, returns YAML snapshots.
  *
- * Request format (JSON, one per connection):
+ * Request format (JSON POST to /fetch):
  *   {"url": "https://...", "waitSelector": "...", "waitTime": 10000, "viewport": "W,H"}
  *
  * Response format:
- *   YAML snapshot content followed by "---END---" on its own line
+ *   YAML snapshot content (200 OK) or JSON error object (400/500)
  *
  * Environment variables:
- *   SOCKET_FILE    - Unix socket path to listen on
+ *   PW_MODULE    - Path to the playwright Node.js module (required)
+ *   HTTP_PORT    - HTTP port to listen on (default: 8668)
  */
 
 import os from 'node:os';

@@ -1,0 +1,40 @@
+{
+  "skill_name": "webfetch-cdp",
+  "evals": [
+    {
+      "id": 1,
+      "eval_name": "basic-static-page",
+      "prompt": "Use webfetch-cdp to fetch https://example.com and show me the YAML snapshot",
+      "expected_output": "Valid YAML snapshot containing page elements like headings, paragraphs, and links from example.com",
+      "files": []
+    },
+    {
+      "id": 2,
+      "eval_name": "dynamic-spa-page",
+      "prompt": "Use webfetch-cdp to fetch https://react.dev and show me the YAML snapshot. This is a React SPA so it needs JS rendering.",
+      "expected_output": "Valid YAML snapshot with React.dev page content, showing that dynamic content was properly rendered",
+      "files": []
+    },
+    {
+      "id": 3,
+      "eval_name": "google-search",
+      "prompt": "Use webfetch-cdp to search Google for '天天跳绳 AI动作捕捉' and show me the structured results",
+      "expected_output": "YAML snapshot containing Google search results with titles, links, and snippets for the search query",
+      "files": []
+    },
+    {
+      "id": 4,
+      "eval_name": "authenticated-page",
+      "prompt": "Use webfetch-cdp to fetch https://github.com and show me what's on the page. I should be logged in already.",
+      "expected_output": "YAML snapshot showing GitHub content. If logged in, should show user-specific elements like feed, notifications, or dashboard",
+      "files": []
+    },
+    {
+      "id": 5,
+      "eval_name": "error-handling",
+      "prompt": "Use webfetch-cdp to fetch https://this-domain-definitely-does-not-exist-12345.com and tell me what happens",
+      "expected_output": "Clear error message explaining what went wrong (DNS failure, connection timeout, etc.)",
+      "files": []
+    }
+  ]
+}

@@ -147,10 +147,12 @@ The script connects to the user's **existing Chrome browser** via CDP (Chrome De
 | Chrome remote debugging not found | Open `chrome://inspect/#remote-debugging` and enable "Allow remote debugging" |
 | Empty snapshot | Page might need more time; use `--wait-selector` |
 | Navigation failed | Check that the URL is accessible and valid |
-| playwright-cli not found | Install via `npm install -g @playwright/cli` |
+| `playwright-cli not found` | Install via `npm install -g @playwright/cli` — the shell wrapper needs this to locate the Playwright module |
+| `PW_MODULE environment variable not set` | Daemon startup failure; check `/tmp/webfetch-cdp.log` for details |
 
 ## Dependencies
 
-- `playwright-cli` (`@playwright/cli`) — provides the Playwright Node.js module
+- `playwright-cli` (`@playwright/cli`) — provides the Playwright Node.js module (used at daemon startup to locate the module path)
 - Chrome with remote debugging enabled
 - `curl` (macOS built-in)
+- `node` (v14+ for ES module support)
