@@ -178,8 +178,16 @@ if [[ -z "$URL" ]]; then
 fi
 
 # Ensure daemon is running
-if ! is_daemon_running || ! curl -s "http://127.0.0.1:${HTTP_PORT}" >/dev/null 2>&1; then
+if ! is_daemon_running; then
+  echo "[debug] Daemon not running (no valid PID), starting..." >&2
   start_daemon
+elif ! curl -s "http://127.0.0.1:${HTTP_PORT}" >/dev/null 2>&1; then
+  echo "[debug] Daemon process exists but HTTP server not responding, restarting..." >&2
+  stop_daemon
+  sleep 0.5
+  start_daemon
+else
+  echo "[debug] Daemon is running and responsive" >&2
 fi
 
 # Build JSON request and send via HTTP

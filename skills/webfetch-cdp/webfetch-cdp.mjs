@@ -20,6 +20,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 
 // --- Discover Chrome CDP WebSocket URL ---
 
@@ -94,6 +95,90 @@ async function discoverChromeWsUrl() {
     }
   }
 
+  return null;
+}
+
+// --- Auto-launch Chrome with CDP enabled ---
+
+async function launchChromeWithCDP() {
+  const platform = os.platform();
+  let chromePath = null;
+  const userDataDir = path.join(os.tmpdir(), 'webfetch-cdp-chrome-profile');
+
+  if (platform === 'darwin') {
+    const possiblePaths = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+    ];
+    for (const p of possiblePaths) {
+      if (fs.existsSync(p)) {
+        chromePath = p;
+        break;
+      }
+    }
+  } else if (platform === 'linux') {
+    const possiblePaths = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+    ];
+    for (const p of possiblePaths) {
+      if (fs.existsSync(p)) {
+        chromePath = p;
+        break;
+      }
+    }
+  }
+
+  if (!chromePath) {
+    console.error('Error: Chrome not found');
+    return null;
+  }
+
+  console.error(`[chrome] Launching Chrome with CDP on port 9222...`);
+
+  // Ensure user data dir exists
+  if (!fs.existsSync(userDataDir)) {
+    fs.mkdirSync(userDataDir, { recursive: true });
+  }
+
+  const chromeProcess = spawn(chromePath, [
+    '--remote-debugging-port=9222',
+    `--user-data-dir=${userDataDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-default-apps',
+    '--disable-popup-blocking',
+    '--disable-extensions',
+    '--disable-plugins',
+    '--disable-background-networking',
+    '--disable-sync',
+    '--metrics-recording-only',
+    '--no-pings',
+    '--mute-audio',
+    '--disable-hang-monitor',
+    '--disable-prompt-on-repost',
+    '--password-store=basic',
+    '--use-mock-keychain',
+  ], {
+    stdio: 'ignore',
+    detached: true,
+  });
+
+  chromeProcess.unref();
+
+  // Wait for Chrome to start and CDP port to be available
+  console.error('[chrome] Waiting for Chrome to be ready...');
+  for (let i = 0; i < 30; i++) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (await checkPort(9222)) {
+      console.error('[chrome] Chrome is ready on port 9222');
+      return `ws://127.0.0.1:9222`;
+    }
+  }
+
+  console.error('Error: Chrome failed to start within 30 seconds');
   return null;
 }
 
@@ -188,26 +273,38 @@ async function main() {
   }
 
   // Discover and connect to Chrome CDP
-  const wsUrl = await discoverChromeWsUrl();
+  let wsUrl = await discoverChromeWsUrl();
   let browser;
 
   if (wsUrl) {
+    console.error(`[cdp] Found Chrome CDP at ${wsUrl}`);
     try {
       browser = await chromium.connectOverCDP(wsUrl);
     } catch (e) {
-      console.error(`Error: Failed to connect to Chrome via CDP (${wsUrl})`);
+      console.error(`Error: Failed to connect to Chrome via CDP (${wsUrl}): ${e.message}`);
       process.exit(1);
     }
   } else {
-    console.error('Error: Chrome remote debugging port not found.');
-    process.exit(1);
+    // Auto-launch Chrome with CDP enabled
+    console.error('[cdp] No Chrome CDP found, attempting to launch Chrome...');
+    wsUrl = await launchChromeWithCDP();
+    if (!wsUrl) {
+      console.error('Error: Chrome remote debugging port not found and failed to auto-launch.');
+      process.exit(1);
+    }
+    try {
+      browser = await chromium.connectOverCDP(wsUrl);
+    } catch (e) {
+      console.error(`Error: Failed to connect to auto-launched Chrome: ${e.message}`);
+      process.exit(1);
+    }
   }
 
   // Write PID so the shell wrapper can find us
   fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
   console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
 
-  // Monitor browser disconnection
+  // Monitor browser disconnection (single listener)
   browser.on('disconnected', () => {
     console.error('[FATAL] Browser disconnected! Process will exit.');
     process.exit(1);
@@ -255,15 +352,15 @@ async function main() {
     console.error(`HTTP server error: ${e.message}`);
   });
 
-  // Keep process alive
-  const keepAlive = setInterval(() => {}, 60000);
+  // Keep process alive - HTTP server alone may not be enough if browser disconnects
+  const keepAlive = setInterval(() => {
+    // Check if browser is still connected
+    if (!browser.isConnected()) {
+      console.error('[keepalive] Browser disconnected, exiting...');
+      process.exit(1);
+    }
+  }, 30000);
   keepAlive.ref();
-
-  // Monitor browser connection
-  browser.on('disconnected', () => {
-    console.error('[http] Browser disconnected, exiting...');
-    process.exit(1);
-  });
 }
 
 main().catch((e) => {
