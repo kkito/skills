@@ -8,14 +8,25 @@ description: >
 allowed-tools: Bash(webfetch-cdp.sh:*)
 ---
 
-# WebFetch CDP - Playwright CLI Snapshot Extractor
+# WebFetch CDP - Playwright CDP Snapshot Extractor
 
-Fetch web page content using playwright-cli's CDP (Chrome DevTools Protocol) snapshot capability. The snapshot outputs a structured YAML format containing page elements, hierarchy, and links - ideal for LLM processing.
+Fetch web page content by connecting to the user's existing Chrome browser via CDP (Chrome DevTools Protocol). Outputs a structured YAML snapshot containing page elements, hierarchy, and links - ideal for LLM processing.
+
+## Prerequisites
+
+Chrome must have remote debugging enabled:
+
+1. Open `chrome://inspect/#remote-debugging` in Chrome
+2. Check **"Allow remote debugging for this browser instance"**
+3. Restart Chrome if prompted
+
+The script auto-discovers the debugging port (via `DevToolsActivePort` file or scanning ports 9222/9229/9333).
 
 ## When to Use This Skill
 
 - Need to access any webpage to get information
-- The page requires JavaScript rendering (React, Vue, Angular SPAs)
+- Page requires login state (user's Chrome is already logged in)
+- Page requires JavaScript rendering (React, Vue, Angular SPAs)
 - Content is dynamically loaded (lazy-load, async requests)
 - Need structured page information (element types, hierarchy, links)
 - User asks about content on a website
@@ -25,22 +36,30 @@ Fetch web page content using playwright-cli's CDP (Chrome DevTools Protocol) sna
 ### Basic Page Fetch
 
 ```bash
+./skills/webfetch-cdp/webfetch-cdp.sh https://example.com
+```
+
+Or with `--url` flag:
+
+```bash
 ./skills/webfetch-cdp/webfetch-cdp.sh --url "https://example.com"
 ```
 
 Expected output:
 
 ```yaml
-- generic [ref=e2]:
-  - heading "Example Domain" [level=1] [ref=e3]
-  - paragraph [ref=e4]: This domain is for use in documentation examples...
+- heading "Example Domain" [level=1]
+- paragraph: This domain is for use in documentation examples...
+- paragraph:
+  - link "Learn more":
+    - /url: https://iana.org/domains/example
 ```
 
 ### Wait for Dynamic Content
 
 ```bash
 ./skills/webfetch-cdp/webfetch-cdp.sh \
-  --url "https://example.com/app" \
+  https://example.com/app \
   --wait-selector "#data-table" \
   --wait-time 15000
 ```
@@ -49,7 +68,7 @@ Expected output:
 
 ```bash
 ./skills/webfetch-cdp/webfetch-cdp.sh \
-  --url "https://example.com" \
+  https://example.com \
   --viewport "1920,1080"
 ```
 
@@ -57,15 +76,15 @@ Expected output:
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `--url` | Yes | - | Target URL to fetch |
+| `<url>` (positional) | No | - | Target URL (can also use `--url`) |
+| `--url` | No | - | Target URL (alternative to positional) |
 | `--wait-selector` | No | None | CSS selector to wait for before snapshot |
 | `--wait-time` | No | 10000 | Max wait time in milliseconds |
 | `--viewport` | No | None | Viewport size as "width,height" |
-| `--no-close` | No | false | Don't close browser after fetch |
 
 ## Output Format
 
-Outputs playwright-cli's snapshot YAML directly to stdout:
+Outputs Playwright's aria snapshot as YAML to stdout:
 
 ```yaml
 - generic [ref=e2]:
@@ -75,35 +94,36 @@ Outputs playwright-cli's snapshot YAML directly to stdout:
     - /url: https://iana.org/domains/example
 ```
 
-## Browser Reuse
+The snapshot preserves page structure (element types, hierarchy, links) which is better for LLM understanding than plain text.
 
-The script automatically detects and reuses an open browser:
+## Browser Reuse (CDP)
 
-| Scenario | Behavior |
-|----------|----------|
-| No active browser | Opens new browser → navigates → fetches → closes |
-| Browser already open | Reuses existing browser → navigates → fetches (keeps open) |
+The script connects to the user's **existing Chrome browser** via CDP (Chrome DevTools Protocol):
 
-To explicitly keep the browser open, use `--no-close`.
+| Behavior | Description |
+|----------|-------------|
+| Auto-discovery | Finds Chrome debugging port via `DevToolsActivePort` file or common ports (9222, 9229, 9333) |
+| Reuses Chrome | Connects to the user's daily Chrome — **preserves all login states** |
+| New tab only | Opens a new tab for the target URL, closes it after fetch — **never touches user's existing tabs** |
+| Safe disconnect | Drops CDP connection on exit without closing the browser |
 
 ## Error Handling
 
-If a command fails, you'll see an error message on stderr. Common issues:
-
 | Issue | Solution |
 |-------|----------|
-| Element not found | Add `--wait-selector` or increase `--wait-time` |
-| Empty snapshot | Page might need more time to render; use `--wait-selector` |
-| playwright-cli not found | Run `npm install -g playwright-cli` or use `npx playwright-cli` |
+| Chrome remote debugging not found | Open `chrome://inspect/#remote-debugging` and enable "Allow remote debugging" |
+| Empty snapshot | Page might need more time; use `--wait-selector` |
 | Navigation failed | Check that the URL is accessible and valid |
+| playwright-cli not found | Install via `npm install -g @playwright/cli` |
 
 ## Dependencies
 
-- `playwright-cli` - available globally or via npx
+- `playwright-cli` (`@playwright/cli`) — provides the Playwright Node.js module
+- Chrome with remote debugging enabled
 
-## Advanced: Direct playwright-cli Usage
+## Advanced: Direct Playwright Usage
 
-For complex multi-step interactions, use playwright-cli directly:
+For complex multi-step interactions, use Playwright directly:
 
 ```bash
 # Open and navigate
@@ -113,7 +133,6 @@ playwright-cli snapshot
 # Interact with page
 playwright-cli click e3
 playwright-cli fill e5 "search query"
-playwright-cli press Enter
 playwright-cli snapshot
 
 # Close when done
