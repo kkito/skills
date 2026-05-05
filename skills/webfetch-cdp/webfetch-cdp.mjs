@@ -283,41 +283,42 @@ async function main() {
     process.exit(1);
   }
 
-  // Discover and connect to Chrome CDP
-  let wsUrl = await discoverChromeWsUrl();
-  let browser;
+  // --- CDP state: lazy connect, never kill daemon ---
+  let browser = null;
+  let browserConnected = false;
 
   async function connectBrowser() {
-    // Clear cached URL to force fresh discovery (Chrome restarts change the UUID)
-    wsUrl = null;
-    
-    wsUrl = await discoverChromeWsUrl();
+    const wsUrl = await discoverChromeWsUrl();
     if (!wsUrl) {
-      throw new Error('Chrome CDP not found');
+      throw new Error('Chrome CDP not found (Chrome not running with --remote-debugging-port?)');
     }
     console.error(`[cdp] Connecting to Chrome CDP at ${wsUrl}`);
     browser = await chromium.connectOverCDP(wsUrl);
+    browserConnected = true;
+    console.error('[cdp] Connected');
+
+    browser.on('disconnected', () => {
+      console.error('[cdp] Browser disconnected — will reconnect on next request');
+      browserConnected = false;
+      browser = null;
+    });
   }
 
-  try {
-    await connectBrowser();
-  } catch (e) {
-    console.error(`Error: Failed to connect to Chrome: ${e.message}`);
-    process.exit(1);
+  async function ensureBrowser() {
+    if (browser && browserConnected && browser.isConnected()) {
+      return browser;
+    }
+    // Not connected — try (re)connect
+    try {
+      await connectBrowser();
+      return browser;
+    } catch (e) {
+      console.error(`[cdp] Connect failed: ${e.message}`);
+      return null;
+    }
   }
 
-  // Write PID so the shell wrapper can find us
-  fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
-  console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
-
-  // Monitor browser disconnection - auto-reconnect on next request instead of exiting
-  let browserDisconnected = false;
-  browser.on('disconnected', () => {
-    console.error('[WARN] Browser disconnected. Will reconnect on next request.');
-    browserDisconnected = true;
-  });
-
-  // Create HTTP server
+  // --- Start HTTP server FIRST — daemon never dies from CDP issues ---
   const server = createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/fetch') {
       let body = '';
@@ -327,18 +328,14 @@ async function main() {
           const reqData = JSON.parse(body);
           console.error(`[http] POST /fetch: ${reqData.url}`);
 
-          // Reconnect function for handleRequest
-          const reconnectFn = async () => {
-            console.error(`[http] Browser disconnected, reconnecting...`);
-            try {
-              await connectBrowser();
-              console.error('[http] Reconnected to Chrome CDP');
-            } catch (e) {
-              throw new Error(`Reconnect failed: ${e.message}`);
-            }
-          };
+          const b = await ensureBrowser();
+          if (!b) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Chrome CDP not available — start Chrome with --remote-debugging-port' }));
+            return;
+          }
 
-          const result = await handleRequest(browser, reqData, reconnectFn);
+          const result = await handleRequest(b, reqData, ensureBrowser);
           if (result.error) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: result.error }));
@@ -364,41 +361,24 @@ async function main() {
 
   server.listen(port, '127.0.0.1', () => {
     console.error(`webfetch-cdp daemon listening on http://127.0.0.1:${port}`);
+    fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
+    console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
   });
 
   server.on('error', (e) => {
     console.error(`HTTP server error: ${e.message}`);
   });
-
-  // Keep process alive - HTTP server alone may not be enough if browser disconnects
-  const keepAlive = setInterval(() => {
-    // Check if browser is still connected (just log, don't exit)
-    if (!browser.isConnected()) {
-      console.error('[keepalive] Browser disconnected, will reconnect on next request');
-      browserDisconnected = true;
-    }
-  }, 30000);
-  keepAlive.ref();
 }
 
 main().catch((e) => {
-  console.error(`Error: ${e.message}`);
+  console.error(`Fatal: ${e.message}`);
   process.exit(1);
 });
 
 process.on('uncaughtException', (e) => {
   console.error(`[uncaughtException] ${e.message}`);
-  console.error(e.stack);
 });
 
 process.on('unhandledRejection', (e) => {
   console.error(`[unhandledRejection] ${e?.message || e}`);
-});
-
-process.on('exit', (code) => {
-  console.error(`[exit] process exiting with code: ${code}`);
-});
-
-process.on('beforeExit', (code) => {
-  console.error(`[beforeExit] code: ${code}`);
 });
