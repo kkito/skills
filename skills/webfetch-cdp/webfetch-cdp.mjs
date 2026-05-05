@@ -2,18 +2,24 @@
 /**
  * webfetch-cdp.mjs - Core logic for fetching web page content via Playwright CDP
  *
- * Environment variables (set by webfetch-cdp.sh):
- *   PW_MODULE      - Path to playwright module
- *   URL            - Target URL
- *   WAIT_SELECTOR  - CSS selector to wait for (optional)
- *   WAIT_TIME      - Max wait time in ms (default: 10000)
- *   VIEWPORT       - Viewport size as "W,H" (optional)
+ * Runs as a persistent background process. Listens on a Unix domain socket,
+ * receives JSON requests, returns YAML snapshots.
+ *
+ * Request format (JSON, one per connection):
+ *   {"url": "https://...", "waitSelector": "...", "waitTime": 10000, "viewport": "W,H"}
+ *
+ * Response format:
+ *   YAML snapshot content followed by "---END---" on its own line
+ *
+ * Environment variables:
+ *   SOCKET_FILE    - Unix socket path to listen on
  */
 
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
+import { createServer } from 'node:http';
 
 // --- Discover Chrome CDP WebSocket URL ---
 
@@ -27,7 +33,6 @@ function checkPort(port) {
 }
 
 async function discoverChromeWsUrl() {
-  // 1. Try DevToolsActivePort file
   const possiblePaths = [];
   const platform = os.platform();
   const home = os.homedir();
@@ -68,11 +73,9 @@ async function discoverChromeWsUrl() {
     } catch { /* file not found, continue */ }
   }
 
-  // 2. Scan common ports
   const commonPorts = [9222, 9229, 9333];
   for (const port of commonPorts) {
     if (await checkPort(port)) {
-      // Try to get WebSocket URL via HTTP
       try {
         const http = await import('node:http');
         const body = await new Promise((resolve, reject) => {
@@ -94,128 +97,193 @@ async function discoverChromeWsUrl() {
   return null;
 }
 
-// --- Main ---
+// --- Handle a single request ---
 
-async function main() {
-  const { URL, WAIT_SELECTOR, WAIT_TIME, VIEWPORT, PW_MODULE } = process.env;
-
-  if (!URL) {
-    console.error('Error: URL is required');
-    process.exit(1);
-  }
-
-  if (!PW_MODULE) {
-    console.error('Error: PW_MODULE environment variable not set');
-    process.exit(1);
-  }
-
-  // Load playwright dynamically
-  let chromium;
-  try {
-    const pwPath = path.join(PW_MODULE, 'index.js');
-    const pw = await import(pwPath);
-    // ESM import returns namespace; playwright uses default export
-    chromium = pw.default?.chromium || pw.chromium;
-    if (!chromium) {
-      console.error('Error: chromium not found in playwright module');
-      console.error('Available exports:', Object.keys(pw).join(', '));
-      process.exit(1);
-    }
-  } catch (e) {
-    console.error(`Error: Failed to load playwright from ${PW_MODULE}`);
-    console.error(e.message);
-    process.exit(1);
-  }
-
-  // Discover Chrome CDP endpoint
-  const wsUrl = await discoverChromeWsUrl();
-  let browser;
-  let createdPage = false;
-
-  if (wsUrl) {
-    try {
-      browser = await chromium.connectOverCDP(wsUrl);
-    } catch (e) {
-      console.error(`Error: Failed to connect to Chrome via CDP (${wsUrl})`);
-      console.error(e.message);
-      process.exit(1);
-    }
-  } else {
-    console.error(
-      'Error: Chrome remote debugging port not found.\n' +
-      '  Please enable it in Chrome:\n' +
-      '  1. Open chrome://inspect/#remote-debugging\n' +
-      '  2. Check "Allow remote debugging for this browser instance"\n' +
-      '  (You may need to restart Chrome after enabling)'
-    );
-    process.exit(1);
+async function handleRequest(browser, req) {
+  const { url, waitSelector, waitTime = 10000, viewport } = req;
+  if (!url) {
+    return { error: 'url is required' };
   }
 
   let page = null;
-
   try {
-    // Find or create a browser context
+    // Reuse existing context (newContext may not work with CDP-connected browser)
     const contexts = browser.contexts();
     let context;
     if (contexts.length > 0) {
       context = contexts[0];
     } else {
-      context = await browser.newContext();
+      try {
+        context = await browser.newContext();
+      } catch (e) {
+        console.error(`[http] newContext failed: ${e.message}`);
+        throw e;
+      }
     }
 
-    // Record existing page count so we only close what we created
-    const existingPageCount = context.pages().length;
-
     // Create a new page for this fetch
-    page = await context.newPage();
-    createdPage = true;
+    try {
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('newPage timeout')), 15000));
+      page = await Promise.race([context.newPage(), timeout]);
+    } catch (e) {
+      console.error(`[http] newPage failed:`, e.message);
+      throw e;
+    }
 
     // Set viewport if specified
-    if (VIEWPORT) {
-      const [width, height] = VIEWPORT.split(',').map(Number);
+    if (viewport) {
+      const [width, height] = viewport.split(',').map(Number);
       if (width && height) {
         await page.setViewportSize({ width, height });
       }
     }
 
     // Navigate to URL
-    await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Wait for network to be idle (SPA apps often need time for API calls after initial HTML load)
+    // Wait for network to be idle
     try {
-      await page.waitForLoadState('networkidle', { timeout: parseInt(WAIT_TIME || '10000') });
+      await page.waitForLoadState('networkidle', { timeout: waitTime });
     } catch {
-      // Non-fatal: network may never be idle on pages with polling
+      // Timeout is non-fatal
     }
 
     // Wait for selector if specified
-    if (WAIT_SELECTOR) {
+    if (waitSelector) {
       try {
-        await page.waitForSelector(WAIT_SELECTOR, { timeout: parseInt(WAIT_TIME || '10000') });
+        await page.waitForSelector(waitSelector, { timeout: waitTime });
       } catch {
-        // Non-fatal: continue with snapshot even if selector not found
+        // Non-fatal: continue with snapshot
       }
     }
 
-    // Take aria snapshot using _snapshotForAI (has built-in content polling with increasing delays)
-    // This is the same path playwright-cli snapshot uses
-    const snapshotResult = await page._snapshotForAI({ timeout: parseInt(WAIT_TIME || '10000') });
-    console.log(snapshotResult.full);
-
+    // Take aria snapshot
+    const snapshotResult = await page._snapshotForAI({ timeout: waitTime });
+    return { snapshot: snapshotResult.full };
   } finally {
-    // Close only the page we created, never touch user's pages
     if (page) {
       await page.close().catch(() => {});
     }
-    // CDP-connected browser doesn't support disconnect(); just let process exit.
-    // The WebSocket connection will be dropped when the Node process terminates.
-    // browser.close() would kill the user's Chrome, so we never call it.
   }
 }
 
-main().then(() => {
-  process.exit(0);
-}).catch((e) => {
+// --- Persistent daemon mode ---
+
+async function main() {
+  const { PW_MODULE, HTTP_PORT } = process.env;
+
+  if (!PW_MODULE) {
+    console.error('Error: PW_MODULE environment variable not set');
+    process.exit(1);
+  }
+
+  const port = HTTP_PORT ? parseInt(HTTP_PORT, 10) : 8668;
+
+  // Load playwright
+  const pw = await import(`file://${PW_MODULE}/index.js`);
+  const chromium = pw.default?.chromium || pw.chromium;
+  if (!chromium) {
+    console.error('Error: chromium not found in playwright module');
+    process.exit(1);
+  }
+
+  // Discover and connect to Chrome CDP
+  const wsUrl = await discoverChromeWsUrl();
+  let browser;
+
+  if (wsUrl) {
+    try {
+      browser = await chromium.connectOverCDP(wsUrl);
+    } catch (e) {
+      console.error(`Error: Failed to connect to Chrome via CDP (${wsUrl})`);
+      process.exit(1);
+    }
+  } else {
+    console.error('Error: Chrome remote debugging port not found.');
+    process.exit(1);
+  }
+
+  // Write PID so the shell wrapper can find us
+  fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
+  console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
+
+  // Monitor browser disconnection
+  browser.on('disconnected', () => {
+    console.error('[FATAL] Browser disconnected! Process will exit.');
+    process.exit(1);
+  });
+
+  // Create HTTP server
+  const server = createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/fetch') {
+      let body = '';
+      req.on('data', chunk => { body += chunk.toString(); });
+      req.on('end', async () => {
+        try {
+          const reqData = JSON.parse(body);
+          console.error(`[http] POST /fetch: ${reqData.url}`);
+
+          const result = await handleRequest(browser, reqData);
+          if (result.error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: result.error }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end(result.snapshot);
+          }
+        } catch (e) {
+          console.error(`[http] error:`, e.message);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    } else if (req.method === 'POST' && req.url === '/exit') {
+      res.writeHead(200);
+      res.end('ok');
+      process.exit(0);
+    } else {
+      res.writeHead(404);
+      res.end('Not found');
+    }
+  });
+
+  server.listen(port, '127.0.0.1', () => {
+    console.error(`webfetch-cdp daemon listening on http://127.0.0.1:${port}`);
+  });
+
+  server.on('error', (e) => {
+    console.error(`HTTP server error: ${e.message}`);
+  });
+
+  // Keep process alive
+  const keepAlive = setInterval(() => {}, 60000);
+  keepAlive.ref();
+
+  // Monitor browser connection
+  browser.on('disconnected', () => {
+    console.error('[http] Browser disconnected, exiting...');
+    process.exit(1);
+  });
+}
+
+main().catch((e) => {
   console.error(`Error: ${e.message}`);
   process.exit(1);
+});
+
+process.on('uncaughtException', (e) => {
+  console.error(`[uncaughtException] ${e.message}`);
+  console.error(e.stack);
+});
+
+process.on('unhandledRejection', (e) => {
+  console.error(`[unhandledRejection] ${e?.message || e}`);
+});
+
+process.on('exit', (code) => {
+  console.error(`[exit] process exiting with code: ${code}`);
+});
+
+process.on('beforeExit', (code) => {
+  console.error(`[beforeExit] code: ${code}`);
 });

@@ -48,11 +48,12 @@ Or with `--url` flag:
 Expected output:
 
 ```yaml
-- heading "Example Domain" [level=1]
-- paragraph: This domain is for use in documentation examples...
-- paragraph:
-  - link "Learn more":
-    - /url: https://iana.org/domains/example
+- heading "Example Domain" [level=1] [ref=e3]
+- paragraph [ref=e4]: This domain is for use in documentation examples without needing permission. Avoid use in operations.
+- paragraph [ref=e5]:
+  - link "Learn more" [ref=e6] [cursor=pointer]:
+    - text: Learn more
+    - /url: https://www.iana.org/domains/example
 ```
 
 ### Wait for Dynamic Content
@@ -120,21 +121,4 @@ The script connects to the user's **existing Chrome browser** via CDP (Chrome De
 
 - `playwright-cli` (`@playwright/cli`) — provides the Playwright Node.js module
 - Chrome with remote debugging enabled
-
-## Advanced: Direct Playwright Usage
-
-For complex multi-step interactions, use Playwright directly:
-
-```bash
-# Open and navigate
-playwright-cli open https://example.com
-playwright-cli snapshot
-
-# Interact with page
-playwright-cli click e3
-playwright-cli fill e5 "search query"
-playwright-cli snapshot
-
-# Close when done
-playwright-cli close
-```
+- `curl` (macOS built-in)
