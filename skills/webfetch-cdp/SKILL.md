@@ -5,6 +5,9 @@ description: >
   Takes a URL and a prompt as input, fetches the URL content, and processes
   the content with the prompt. Returns the model's response about the content.
   Use this tool when you need to retrieve and analyze web content.
+  Also supports web search via search engine URLs (Google, Bing) — no API key needed,
+  leverages Chrome login state for personalized results. Ideal for real-time web search
+  and dynamic content that requires JavaScript rendering or authentication.
 allowed-tools: Bash(webfetch-cdp.sh:*)
 ---
 
@@ -71,6 +74,35 @@ Expected output:
 ./skills/webfetch-cdp/webfetch-cdp.sh \
   https://example.com \
   --viewport "1920,1080"
+```
+
+### Web Search (Google/Bing)
+
+Search the web without needing an API key — leverages your Chrome login state for personalized results:
+
+```bash
+# Google search
+./skills/webfetch-cdp/webfetch-cdp.sh "https://www.google.com/search?q=天天跳绳"
+
+# Bing search
+./skills/webfetch-cdp/webfetch-cdp.sh "https://www.bing.com/search?q=天天跳绳"
+
+# Search with longer wait time for dynamic content
+./skills/webfetch-cdp/webfetch-cdp.sh \
+  "https://www.google.com/search?q=天天跳绳" \
+  --wait-time 10000
+```
+
+Expected output: structured YAML containing search results (titles, links, snippets):
+
+```yaml
+- link "天天跳绳" [ref=e142]:
+  - /url: https://tiantiantiaosheng.com/dl/
+  - heading "天天跳绳" [level=3]
+- generic: 基于AI动作捕捉，与屏幕中元素体感互动得分，经典和创新的训练动作都在这...
+- link "天天跳绳app-官方正版软件2026最新版本免费下载" [ref=e172]:
+  - /url: https://sj.qq.com/appdetail/com.gkid.crazyrope
+  - heading "天天跳绳app-官方正版软件2026最新版本免费下载" [level=3]
 ```
 
 ## Script Parameters
