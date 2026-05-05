@@ -62,6 +62,20 @@ if [[ -z "$URL" ]]; then
   exit 1
 fi
 
+# Sanitize --wait-selector to prevent command injection via JS interpolation
+if [[ -n "$WAIT_SELECTOR" ]]; then
+  if [[ "$WAIT_SELECTOR" == *["';()"]* ]]; then
+    echo "Error: --wait-selector contains invalid characters" >&2
+    exit 1
+  fi
+fi
+
+# Validate --wait-time is a number
+if ! [[ "$WAIT_TIME" =~ ^[0-9]+$ ]]; then
+  echo "Error: --wait-time must be a number" >&2
+  exit 1
+fi
+
 # Determine playwright-cli command
 PLAYWRIGHT_CLI="playwright-cli"
 if ! command -v "$PLAYWRIGHT_CLI" &>/dev/null; then
@@ -86,25 +100,43 @@ has_active_browser() {
 # Track if we opened a new browser (to decide whether to close)
 BROWSER_WAS_OPEN=false
 
+# Temp directory for trap-based cleanup (set in fetch_page)
+TEMP_DIR=""
+
+# Trap-based cleanup: removes temp dir and closes browser if we opened it
+cleanup() {
+  if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+    rm -rf "$TEMP_DIR"
+  fi
+  if [[ "${BROWSER_WAS_OPEN:-false}" != "true" && "${NO_CLOSE:-false}" != "true" ]]; then
+    $PLAYWRIGHT_CLI close 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 # Main fetch function
 fetch_page() {
   local temp_dir
-  temp_dir=$(mktemp -d)
+  temp_dir=$(mktemp -d) || {
+    echo "Error: Failed to create temporary directory" >&2
+    exit 1
+  }
   local snapshot_file="$temp_dir/snapshot.yml"
+
+  # Register temp dir for trap-based cleanup
+  TEMP_DIR="$temp_dir"
 
   # Navigate: open new browser or goto existing
   if has_active_browser; then
     BROWSER_WAS_OPEN=true
     $PLAYWRIGHT_CLI goto "$URL" || {
       echo "Error: Failed to navigate to $URL" >&2
-      rm -rf "$temp_dir"
-      exit 1
+      return 1
     }
   else
     $PLAYWRIGHT_CLI open "$URL" || {
       echo "Error: Failed to open $URL" >&2
-      rm -rf "$temp_dir"
-      exit 1
+      return 1
     }
   fi
 
@@ -131,12 +163,7 @@ fetch_page() {
   # Take snapshot
   $PLAYWRIGHT_CLI snapshot --filename="$snapshot_file" 2>/dev/null || {
     echo "Error: Failed to take snapshot" >&2
-    # Close browser if we opened it
-    if [[ "$BROWSER_WAS_OPEN" != "true" && "$NO_CLOSE" != "true" ]]; then
-      $PLAYWRIGHT_CLI close 2>/dev/null || true
-    fi
-    rm -rf "$temp_dir"
-    exit 1
+    return 1
   }
 
   # Output snapshot content
@@ -144,20 +171,8 @@ fetch_page() {
     cat "$snapshot_file"
   else
     echo "Error: Snapshot file was not created" >&2
-    if [[ "$BROWSER_WAS_OPEN" != "true" && "$NO_CLOSE" != "true" ]]; then
-      $PLAYWRIGHT_CLI close 2>/dev/null || true
-    fi
-    rm -rf "$temp_dir"
-    exit 1
+    return 1
   fi
-
-  # Close browser if we opened it and --no-close is not set
-  if [[ "$BROWSER_WAS_OPEN" != "true" && "$NO_CLOSE" != "true" ]]; then
-    $PLAYWRIGHT_CLI close 2>/dev/null || true
-  fi
-
-  # Cleanup temp dir
-  rm -rf "$temp_dir"
 }
 
 # Run fetch
