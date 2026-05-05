@@ -1,9 +1,10 @@
 ---
 name: webfetch-cdp
 description: >
-  Fetch web page content using playwright-cli CDP snapshot for LLM processing.
-  Use when the user needs to access a webpage, extract information from a website,
-  or get content from JavaScript-rendered pages (SPAs, dynamic content).
+  Fetches content from a specified URL and processes it using an AI model.
+  Takes a URL and a prompt as input, fetches the URL content, and processes
+  the content with the prompt. Returns the model's response about the content.
+  Use this tool when you need to retrieve and analyze web content.
 allowed-tools: Bash(webfetch-cdp.sh:*)
 ---
 
