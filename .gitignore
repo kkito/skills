@@ -26,3 +26,5 @@ build/
 skills-lock.json
 .agents
 .qwen
+.claude
+.playwright

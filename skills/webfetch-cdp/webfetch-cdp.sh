@@ -90,8 +90,8 @@ fi
 has_active_browser() {
   local output
   output=$($PLAYWRIGHT_CLI list 2>/dev/null || true)
-  # If output contains active session info, browser is open
-  if [[ -n "$output" ]] && echo "$output" | grep -qi "active\|session\|page\|url"; then
+  # If output contains "status: open", a browser session is active
+  if echo "$output" | grep -qi "status: open"; then
     return 0
   fi
   return 1
@@ -105,12 +105,14 @@ TEMP_DIR=""
 
 # Trap-based cleanup: removes temp dir and closes browser if we opened it
 cleanup() {
+  local exit_code=$?
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
     rm -rf "$TEMP_DIR"
   fi
   if [[ "${BROWSER_WAS_OPEN:-false}" != "true" && "${NO_CLOSE:-false}" != "true" ]]; then
     $PLAYWRIGHT_CLI close 2>/dev/null || true
   fi
+  exit "$exit_code"
 }
 trap cleanup EXIT
 
@@ -138,6 +140,14 @@ fetch_page() {
       echo "Error: Failed to open $URL" >&2
       return 1
     }
+  fi
+
+  # Check if navigation resulted in an error page (e.g., DNS resolution failure)
+  local page_url
+  page_url=$($PLAYWRIGHT_CLI eval "window.location.href" 2>/dev/null | grep -o 'chrome-error://' || true)
+  if [[ -n "$page_url" ]]; then
+    echo "Error: Failed to load $URL - page could not be reached" >&2
+    return 1
   fi
 
   # Set viewport if specified
