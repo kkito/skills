@@ -21,7 +21,7 @@ skills/
 
 | Skill | Description |
 |-------|-------------|
-| *(TODO)* | |
+| `webfetch-cdp` | 通过 CDP (Chrome DevTools Protocol) 连接用户正在使用的 Chrome 浏览器，实现网页内容抓取 (webfetch) 和网页搜索 (websearch)。无需 API Key，利用浏览器登录态，支持 SPA/JS 渲染页面。输出结构化 YAML 快照，适合 LLM 处理。 |
 
 ## License
 
