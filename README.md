@@ -17,6 +17,14 @@ skills/
 └── ...
 ```
 
+## Installation
+
+```bash
+npx skills add kkito/skills
+```
+
+> **注意:** 仅在自己机器上 macOS 15.7.2 上测试过。安装后 skills 目录下的技能即可在 AI 助手中使用。
+
 ## Available Skills
 
 | Skill | Description |
