@@ -23,6 +23,23 @@ import net from 'node:net';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 
+// --- Safe logging (never throws) ---
+
+function log(...args) {
+  try {
+    const prefix = new Date().toISOString();
+    console.error(prefix, ...args);
+  } catch {
+    try {
+      const msg = args.map(a =>
+        typeof a === 'string' ? a :
+        (a && typeof a === 'object' ? (a.stack || a.message || String(a)) : String(a))
+      ).join(' ');
+      fs.appendFileSync('/tmp/webfetch-cdp-exit.log', `[${new Date().toISOString()}] [log-fallback] ${msg}\n`);
+    } catch {}
+  }
+}
+
 // --- Discover Chrome CDP WebSocket URL ---
 
 function checkPort(port) {
@@ -133,11 +150,11 @@ async function launchChromeWithCDP() {
   }
 
   if (!chromePath) {
-    console.error('Error: Chrome not found');
+    log('Error: Chrome not found');
     return null;
   }
 
-  console.error(`[chrome] Launching Chrome with CDP on port 9222...`);
+  log('[chrome] Launching Chrome with CDP on port 9222...');
 
   // Ensure user data dir exists
   if (!fs.existsSync(userDataDir)) {
@@ -170,34 +187,42 @@ async function launchChromeWithCDP() {
   chromeProcess.unref();
 
   // Wait for Chrome to start and CDP port to be available
-  console.error('[chrome] Waiting for Chrome to be ready...');
+  log('[chrome] Waiting for Chrome to be ready...');
   for (let i = 0; i < 30; i++) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     if (await checkPort(9222)) {
-      console.error('[chrome] Chrome is ready on port 9222');
+      log('[chrome] Chrome is ready on port 9222');
       return `ws://127.0.0.1:9222`;
     }
   }
 
-  console.error('Error: Chrome failed to start within 30 seconds');
+  log('Error: Chrome failed to start within 30 seconds');
   return null;
 }
 
+// --- Module-level state (shared between handleRequest and main closure) ---
+let browser = null;
+let browserConnected = false;
+let connectingPromise = null;
+
 // --- Handle a single request ---
 
-async function handleRequest(browser, req, reconnectFn) {
-  const { url, waitSelector, waitTime = 10000, viewport } = req;
+async function handleRequest(reqData, reconnectFn) {
+  const { url, waitSelector, waitTime = 10000, viewport } = reqData;
   if (!url) {
     return { error: 'url is required' };
   }
 
-  // Check if browser is still connected, reconnect if needed
-  if (!browser.isConnected()) {
-    console.error(`[http] Browser disconnected, reconnecting...`);
+  // Use module-level browser directly (never passed as parameter — avoids stale refs)
+  if (!browser || !browser.isConnected()) {
+    log(`[http] Browser not connected, reconnecting...`);
     try {
       await reconnectFn();
     } catch (e) {
       return { error: `Failed to reconnect: ${e.message}` };
+    }
+    if (!browser || !browser.isConnected()) {
+      return { error: 'Browser still not connected after reconnect attempt' };
     }
   }
 
@@ -212,7 +237,7 @@ async function handleRequest(browser, req, reconnectFn) {
       try {
         context = await browser.newContext();
       } catch (e) {
-        console.error(`[http] newContext failed: ${e.message}`);
+        log(`[http] newContext failed: ${e.message}`);
         throw e;
       }
     }
@@ -222,7 +247,7 @@ async function handleRequest(browser, req, reconnectFn) {
       const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('newPage timeout')), 15000));
       page = await Promise.race([context.newPage(), timeout]);
     } catch (e) {
-      console.error(`[http] newPage failed:`, e.message);
+      log(`[http] newPage failed:`, e.message);
       throw e;
     }
 
@@ -269,8 +294,8 @@ async function main() {
   const { PW_MODULE, HTTP_PORT } = process.env;
 
   if (!PW_MODULE) {
-    console.error('Error: PW_MODULE environment variable not set');
-    process.exit(1);
+    log('Error: PW_MODULE environment variable not set');
+    return;
   }
 
   const port = HTTP_PORT ? parseInt(HTTP_PORT, 10) : 8668;
@@ -279,29 +304,36 @@ async function main() {
   const pw = await import(`file://${PW_MODULE}/index.js`);
   const chromium = pw.default?.chromium || pw.chromium;
   if (!chromium) {
-    console.error('Error: chromium not found in playwright module');
-    process.exit(1);
+    log('Error: chromium not found in playwright module');
+    return;
   }
 
-  // --- CDP state: lazy connect, never kill daemon ---
-  let browser = null;
-  let browserConnected = false;
-
+  // --- CDP: lazy connect, never kill daemon ---
   async function connectBrowser() {
-    const wsUrl = await discoverChromeWsUrl();
-    if (!wsUrl) {
-      throw new Error('Chrome CDP not found (Chrome not running with --remote-debugging-port?)');
-    }
-    console.error(`[cdp] Connecting to Chrome CDP at ${wsUrl}`);
-    browser = await chromium.connectOverCDP(wsUrl);
-    browserConnected = true;
-    console.error('[cdp] Connected');
+    if (connectingPromise) return connectingPromise;
 
-    browser.on('disconnected', () => {
-      console.error('[cdp] Browser disconnected — will reconnect on next request');
-      browserConnected = false;
-      browser = null;
-    });
+    connectingPromise = (async () => {
+      try {
+        const wsUrl = await discoverChromeWsUrl();
+        if (!wsUrl) {
+          throw new Error('Chrome CDP not found (Chrome not running with --remote-debugging-port?)');
+        }
+        log(`[cdp] Connecting to Chrome CDP at ${wsUrl}`);
+        browser = await chromium.connectOverCDP(wsUrl);
+        browserConnected = true;
+        log('[cdp] Connected');
+
+        browser.on('disconnected', () => {
+          log('[cdp] Browser disconnected — will reconnect on next request');
+          browserConnected = false;
+          browser = null;
+        });
+      } finally {
+        connectingPromise = null;
+      }
+    })();
+
+    return connectingPromise;
   }
 
   async function ensureBrowser() {
@@ -313,7 +345,7 @@ async function main() {
       await connectBrowser();
       return browser;
     } catch (e) {
-      console.error(`[cdp] Connect failed: ${e.message}`);
+      log(`[cdp] Connect failed: ${e.message}`);
       return null;
     }
   }
@@ -324,32 +356,29 @@ async function main() {
       let body = '';
       req.on('data', chunk => { body += chunk.toString(); });
       req.on('end', async () => {
+        const requestId = Math.random().toString(36).substring(7);
         try {
           const reqData = JSON.parse(body);
-          console.error(`[http] POST /fetch: ${reqData.url}`);
+          log(`[http] [${requestId}] POST /fetch: ${reqData.url}`);
 
-          const b = await ensureBrowser();
-          if (!b) {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Chrome CDP not available — start Chrome with --remote-debugging-port' }));
-            return;
-          }
-
-          const result = await handleRequest(b, reqData, ensureBrowser);
+          const result = await handleRequest(reqData, ensureBrowser);
           if (result.error) {
+            log(`[http] [${requestId}] error: ${result.error}`);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: result.error }));
           } else {
+            log(`[http] [${requestId}] success, snapshot length: ${result.snapshot?.length || 0}`);
             res.writeHead(200, { 'Content-Type': 'text/plain' });
             res.end(result.snapshot);
           }
         } catch (e) {
-          console.error(`[http] error:`, e.message);
+          log(`[http] [${requestId}] exception:`, e.message, e.stack);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: e.message }));
         }
       });
     } else if (req.method === 'POST' && req.url === '/exit') {
+      log(`[http] POST /exit received, shutting down...`);
       res.writeHead(200);
       res.end('ok');
       process.exit(0);
@@ -360,25 +389,49 @@ async function main() {
   });
 
   server.listen(port, '127.0.0.1', () => {
-    console.error(`webfetch-cdp daemon listening on http://127.0.0.1:${port}`);
+    log(`webfetch-cdp daemon listening on http://127.0.0.1:${port}`);
     fs.writeFileSync('/tmp/webfetch-cdp.pid', String(process.pid));
-    console.error(`webfetch-cdp daemon started, pid=${process.pid}`);
+    log(`webfetch-cdp daemon started, pid=${process.pid}`);
   });
 
   server.on('error', (e) => {
-    console.error(`HTTP server error: ${e.message}`);
+    log(`HTTP server error: ${e.message}`, e.stack);
   });
+
+  // Keep the process alive even if the event loop becomes empty
+  setInterval(() => {
+    // Dummy interval to keep event loop active
+  }, 60000);
 }
 
 main().catch((e) => {
-  console.error(`Fatal: ${e.message}`);
-  process.exit(1);
+  const logMsg = `[${new Date().toISOString()}] main().catch: ${e.message}\n${e.stack}\n`;
+  fs.appendFileSync('/tmp/webfetch-cdp.log', logMsg);
+  log(`[main.catch] Logged to /tmp/webfetch-cdp.log:`, e.message, e.stack);
 });
 
 process.on('uncaughtException', (e) => {
-  console.error(`[uncaughtException] ${e.message}`);
+  log(`[uncaughtException] ${e.message}`, e.stack);
 });
 
 process.on('unhandledRejection', (e) => {
-  console.error(`[unhandledRejection] ${e?.message || e}`);
+  log(`[unhandledRejection] ${e?.message || e}`, e?.stack);
+});
+
+process.on('SIGINT', () => {
+  log('[signal] SIGINT received');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  log('[signal] SIGTERM received');
+  process.exit(0);
+});
+
+// Diagnostic: log exit code (always fires, independent of stderr health)
+process.on('exit', (code) => {
+  try {
+    fs.appendFileSync('/tmp/webfetch-cdp-exit.log',
+      `[${new Date().toISOString()}] EXIT code=${code}\n`);
+  } catch {}
 });

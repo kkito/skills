@@ -30,3 +30,4 @@ skills-lock.json
 .playwright
 .playwright-cli
 *-workspace
+docs/fix/**/*
